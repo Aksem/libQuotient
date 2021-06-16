@@ -75,7 +75,7 @@ set(CMAKE_AUTOMOC ON)
 option(BUILD_WITH_QT6 "Build Quotient with Qt 6 (EXPERIMENTAL)" OFF)
 
 if (BUILD_WITH_QT6)
-    find_package(Qt6 6.2 REQUIRED Core Network Gui Test) # TODO: Multimedia
+    find_package(Qt6 6.1 REQUIRED Core Network Gui Test) # TODO: Multimedia
     set(Qt Qt6)
     qt6_wrap_cpp(lib_SRCS lib/quotient_common.h)
 else()
