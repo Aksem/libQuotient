@@ -8,7 +8,7 @@
 [![](https://img.shields.io/cii/percentage/1023.svg?label=CII%20best%20practices)](https://bestpractices.coreinfrastructure.org/projects/1023/badge)
 ![](https://img.shields.io/github/commit-activity/y/quotient-im/libQuotient.svg)
 [![Language grade: C/C++](https://img.shields.io/lgtm/grade/cpp/g/quotient-im/libQuotient.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/quotient-im/libQuotient/context:cpp)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](http://makeapullrequest.com)
+[![merge-chance-badge](https://img.shields.io/endpoint?url=https%3A%2F%2Fmerge-chance.info%2Fbadge%3Frepo%3Dquotient-im/libquotient)](https://merge-chance.info/target?repo=quotient-im/libquotient)
 
 The Quotient project aims to produce a Qt5-based SDK to develop applications
 for [Matrix](https://matrix.org). libQuotient is a library that enables client
@@ -196,11 +196,11 @@ libQuotient uses Qt's logging categories to make switching certain types of logg
 quotient.<category>.<level>=<flag>
 ```
 where
-- `<category>` is one of: `main`, `jobs`, `jobs.sync`, `events`, `events.state`
-  (covering both the "usual" room state and account data), `events.messages`,
-  `events.ephemeral`, `e2ee` and `profiler` (you can always find the full list
-  in `lib/logging.cpp`)
-- `<level>` is one of `debug`, `info`, and `warning`
+- `<category>` is one of: `main`, `jobs`, `jobs.sync`, `jobs.thumbnail`,
+  `events`, `events.state` (covering both the "usual" room state and account
+  data), `events.messages`, `events.ephemeral`, `e2ee` and `profiler` (you can
+  always find the full list in `lib/logging.cpp`);
+- `<level>` is one of `debug`, `info`, and `warning`;
 - `<flag>` is either `true` or `false`.
 
 `*` can be used as a wildcard for any part between two dots, and semicolon is used for a separator. Latter statements override former ones, so if you want to switch on all debug logs except `jobs` you can set

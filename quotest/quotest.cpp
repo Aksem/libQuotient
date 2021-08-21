@@ -397,15 +397,16 @@ TEST_IMPL(sendFile)
     }
     tf->write("Test");
     tf->close();
+    QFileInfo tfi { *tf };
     // QFileInfo::fileName brings only the file name; QFile::fileName brings
     // the full path
-    const auto tfName = QFileInfo(*tf).fileName();
+    const auto tfName = tfi.fileName();
     clog << "Sending file " << tfName.toStdString() << endl;
-    const auto txnId =
-        targetRoom->postFile("Test file", QUrl::fromLocalFile(tf->fileName()));
+    const auto txnId = targetRoom->postFile(
+        "Test file", new EventContent::FileContent(tfi));
     if (!validatePendingEvent(txnId)) {
         clog << "Invalid pending event right after submitting" << endl;
-        delete tf;
+        tf->deleteLater();
         FAIL_TEST();
     }
 
@@ -556,7 +557,7 @@ bool TestSuite::checkRedactionOutcome(const QByteArray& thisTest,
     // redacted at the next sync, or the nearest sync completes with
     // the unredacted event but the next one brings redaction.
     auto it = targetRoom->findInTimeline(evtIdToRedact);
-    if (it == targetRoom->timelineEdge())
+    if (it == targetRoom->historyEdge())
         return false; // Waiting for the next sync
 
     if ((*it)->isRedacted()) {

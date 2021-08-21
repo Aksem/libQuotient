@@ -11,7 +11,7 @@
 
 #include "connection.h"
 #include "eventitem.h"
-#include "joinstate.h"
+#include "quotient_common.h"
 
 #include "csapi/message_pagination.h"
 
@@ -93,7 +93,6 @@ class Room : public QObject {
 
     Q_PROPERTY(int timelineSize READ timelineSize NOTIFY addedMessages)
     Q_PROPERTY(QStringList memberNames READ safeMemberNames NOTIFY memberListChanged)
-    Q_PROPERTY(int memberCount READ memberCount NOTIFY memberListChanged)
     Q_PROPERTY(int joinedCount READ joinedCount NOTIFY memberListChanged)
     Q_PROPERTY(int invitedCount READ invitedCount NOTIFY memberListChanged)
     Q_PROPERTY(int totalMemberCount READ totalMemberCount NOTIFY memberListChanged)
@@ -108,7 +107,7 @@ class Room : public QObject {
     Q_PROPERTY(QString readMarkerEventId READ readMarkerEventId WRITE
                    markMessagesAsRead NOTIFY readMarkerMoved)
     Q_PROPERTY(bool hasUnreadMessages READ hasUnreadMessages NOTIFY
-                   unreadMessagesChanged)
+                   unreadMessagesChanged STORED false)
     Q_PROPERTY(int unreadCount READ unreadCount NOTIFY unreadMessagesChanged)
     Q_PROPERTY(int highlightCount READ highlightCount NOTIFY
                    highlightCountChanged RESET resetHighlightCount)
@@ -117,8 +116,8 @@ class Room : public QObject {
     Q_PROPERTY(bool allHistoryLoaded READ allHistoryLoaded NOTIFY addedMessages
                    STORED false)
     Q_PROPERTY(QStringList tagNames READ tagNames NOTIFY tagsChanged)
-    Q_PROPERTY(bool isFavourite READ isFavourite NOTIFY tagsChanged)
-    Q_PROPERTY(bool isLowPriority READ isLowPriority NOTIFY tagsChanged)
+    Q_PROPERTY(bool isFavourite READ isFavourite NOTIFY tagsChanged STORED false)
+    Q_PROPERTY(bool isLowPriority READ isLowPriority NOTIFY tagsChanged STORED false)
 
     Q_PROPERTY(GetRoomEventsJob* eventsHistoryJob READ eventsHistoryJob NOTIFY
                    eventsHistoryJobChanged)
@@ -179,16 +178,9 @@ public:
     Room* successor(JoinStates statesFilter = JoinState::Invite
                                               | JoinState::Join) const;
     QString name() const;
-    /// Room aliases defined on the current user's server
-    /// \sa remoteAliases, setLocalAliases
-    [[deprecated("Use aliases()")]]
-    QStringList localAliases() const;
-    /// Room aliases defined on other servers
-    /// \sa localAliases
-    [[deprecated("Use aliases()")]]
-    QStringList remoteAliases() const;
     QString canonicalAlias() const;
     QStringList altAliases() const;
+    //! Get a list of both canonical and alternative aliases
     QStringList aliases() const;
     QString displayName() const;
     QString topic() const;
@@ -204,8 +196,6 @@ public:
     QStringList memberNames() const;
     QStringList safeMemberNames() const;
     QStringList htmlSafeMemberNames() const;
-    [[deprecated("Use joinedCount(), invitedCount(), totalMemberCount()")]]
-    int memberCount() const;
     int timelineSize() const;
     bool usesEncryption() const;
     RoomEventPtr decryptMessage(const EncryptedEvent& encryptedEvent);
@@ -245,12 +235,19 @@ public:
     /**
      * \brief Check the join state of a given user in this room
      *
+     * \deprecated Use memberState and check against a mask
+     *
      * \note Banned and invited users are not tracked separately for now (Leave
      *       will be returned for them).
      *
      * \return Join if the user is a room member; Leave otherwise
      */
     Q_INVOKABLE Quotient::JoinState memberJoinState(Quotient::User* user) const;
+
+    //! \brief Check the join state of a given user in this room
+    //!
+    //! \return the given user's state with respect to the room
+    Q_INVOKABLE Quotient::Membership memberState(User* user) const;
 
     //! \brief Get a display name (without disambiguation) for the given member
     //!
@@ -264,7 +261,8 @@ public:
      */
     Q_INVOKABLE QString roomMembername(const Quotient::User* u) const;
     /*!
-     * \brief Get a disambiguated name for a user with this id in the room context
+     * \brief Get a disambiguated name for a user with this id in the room
+     * context
      *
      * \deprecated use safeMemberName() instead
      */
@@ -314,8 +312,6 @@ public:
      * arrived event; same as messageEvents().cend()
      */
     Timeline::const_iterator syncEdge() const;
-    /// \deprecated Use historyEdge instead
-    rev_iter_t timelineEdge() const;
     Q_INVOKABLE Quotient::TimelineItem::index_t minTimelineIndex() const;
     Q_INVOKABLE Quotient::TimelineItem::index_t maxTimelineIndex() const;
     Q_INVOKABLE bool
@@ -332,9 +328,13 @@ public:
                                       const char* relType) const;
 
     const RoomCreateEvent* creation() const
-    { return getCurrentState<RoomCreateEvent>(); }
+    {
+        return getCurrentState<RoomCreateEvent>();
+    }
     const RoomTombstoneEvent* tombstone() const
-    { return getCurrentState<RoomTombstoneEvent>(); }
+    {
+        return getCurrentState<RoomTombstoneEvent>();
+    }
 
     bool displayed() const;
     /// Mark the room as currently displayed to the user
@@ -377,7 +377,7 @@ public:
      * events (non-redacted message events from users other than local)
      * are counted.
      *
-     * In a case when readMarker() == timelineEdge() (the local read
+     * In a case when readMarker() == historyEdge() (the local read
      * marker is beyond the local timeline) only the bottom limit of
      * the unread messages number can be estimated (and even that may
      * be slightly off due to, e.g., redactions of events not loaded
@@ -549,8 +549,13 @@ public Q_SLOTS:
     QString postHtmlText(const QString& plainText, const QString& html);
     /// Send a reaction on a given event with a given key
     QString postReaction(const QString& eventId, const QString& key);
+
+    QString postFile(const QString& plainText, EventContent::TypedBase* content);
+#if QT_VERSION_MAJOR < 6
+    /// \deprecated Use postFile(QString, MessageEventType, EventContent) instead
     QString postFile(const QString& plainText, const QUrl& localPath,
                      bool asGenericFile = false);
+#endif
     /** Post a pre-created room message event
      *
      * Takes ownership of the event, deleting it once the matching one

@@ -101,8 +101,8 @@ public:
     UnorderedMap<StateEventKey, StateEventPtr> baseState;
     /// State event stubs - events without content, just type and state key
     static decltype(baseState) stubbedState;
-    /// The state of the room at timeline position after-maxTimelineIndex()
-    /// \sa Room::syncEdge
+    /// The state of the room at syncEdge()
+    /// \sa syncEdge
     QHash<StateEventKey, const StateEventBase*> currentState;
     /// Servers with aliases for this room except the one of the local user
     /// \sa Room::remoteAliases
@@ -198,6 +198,8 @@ public:
 
     /// A point in the timeline corresponding to baseState
     rev_iter_t timelineBase() const { return q->findInTimeline(-1); }
+    rev_iter_t historyEdge() const { return timeline.crend(); }
+    Timeline::const_iterator syncEdge() const { return timeline.cend(); }
 
     void getPreviousContent(int limit = 10, const QString &filter = {});
 
@@ -305,6 +307,8 @@ public:
     {
         return sendEvent(makeEvent<EventT>(std::forward<ArgTs>(eventArgs)...));
     }
+
+    QString doPostFile(RoomEventPtr &&msgEvent, const QUrl &localUrl);
 
     RoomEvent* addAsPending(RoomEventPtr&& event);
 
@@ -458,7 +462,7 @@ Room::Room(Connection* connection, QString id, JoinState initialJoinState)
             emit baseStateLoaded();
         return this == r; // loadedRoomState fires only once per room
     });
-    qCDebug(STATE) << "New" << toCString(initialJoinState) << "Room:" << id;
+    qCDebug(STATE) << "New" << initialJoinState << "Room:" << id;
 }
 
 Room::~Room() { delete d; }
@@ -538,21 +542,6 @@ QStringList Room::altAliases() const
     return d->getCurrentState<RoomCanonicalAliasEvent>()->altAliases();
 }
 
-QStringList Room::localAliases() const
-{
-    return d->getCurrentState<RoomAliasesEvent>(
-        connection()->domain())
-        ->aliases();
-}
-
-QStringList Room::remoteAliases() const
-{
-    QStringList result;
-    for (const auto& s : std::as_const(d->aliasServers))
-        result += d->getCurrentState<RoomAliasesEvent>(s)->aliases();
-    return result;
-}
-
 QString Room::canonicalAlias() const
 {
     return d->getCurrentState<RoomCanonicalAliasEvent>()->alias();
@@ -601,6 +590,11 @@ JoinState Room::memberJoinState(User* user) const
                                                           : JoinState::Leave;
 }
 
+Membership Room::memberState(User* user) const
+{
+    return d->getCurrentState<RoomMemberEvent>(user->id())->membership();
+}
+
 JoinState Room::joinState() const { return d->joinState; }
 
 void Room::setJoinState(JoinState state)
@@ -609,8 +603,8 @@ void Room::setJoinState(JoinState state)
     if (state == oldState)
         return;
     d->joinState = state;
-    qCDebug(STATE) << "Room" << id() << "changed state: " << int(oldState)
-                   << "->" << int(state);
+    qCDebug(STATE) << "Room" << id() << "changed state: " << oldState
+                   << "->" << state;
     emit changed(Change::JoinStateChange);
     emit joinStateChanged(oldState, state);
 }
@@ -646,7 +640,7 @@ void Room::Private::updateUnreadCount(const rev_iter_t& from,
     // unreadMessages and might need to promote the read marker further
     // over local-origin messages.
     auto readMarker = q->readMarker();
-    if (readMarker == timeline.crend() && q->allHistoryLoaded())
+    if (readMarker == historyEdge() && q->allHistoryLoaded())
         --readMarker; // Read marker not found in the timeline, initialise it
     if (readMarker >= from && readMarker < to) {
         promoteReadMarker(q->localUser(), readMarker, true);
@@ -690,7 +684,7 @@ Room::Changes Room::Private::promoteReadMarker(User* u,
                                            // iterators
         return Change::NoChange;
 
-    Q_ASSERT(newMarker < timeline.crend());
+    Q_ASSERT(newMarker < historyEdge());
 
     // Try to auto-promote the read marker over the user's own messages
     // (switch to direct iterators for that).
@@ -705,7 +699,7 @@ Room::Changes Room::Private::promoteReadMarker(User* u,
         QElapsedTimer et;
         et.start();
         unreadMessages =
-            int(count_if(eagerMarker, timeline.cend(),
+            int(count_if(eagerMarker, syncEdge(),
                          [this](const auto& ti) { return isEventNotable(ti); }));
         if (et.nsecsElapsed() > profilerMinNsecs() / 10)
             qCDebug(PROFILER) << "Recounting unread messages took" << et;
@@ -779,14 +773,9 @@ bool Room::hasUnreadMessages() const { return unreadCount() >= 0; }
 
 int Room::unreadCount() const { return d->unreadMessages; }
 
-Room::rev_iter_t Room::historyEdge() const { return d->timeline.crend(); }
+Room::rev_iter_t Room::historyEdge() const { return d->historyEdge(); }
 
-Room::Timeline::const_iterator Room::syncEdge() const
-{
-    return d->timeline.cend();
-}
-
-Room::rev_iter_t Room::timelineEdge() const { return historyEdge(); }
+Room::Timeline::const_iterator Room::syncEdge() const { return d->syncEdge(); }
 
 TimelineItem::index_t Room::minTimelineIndex() const
 {
@@ -806,7 +795,7 @@ bool Room::isValidIndex(TimelineItem::index_t timelineIndex) const
 
 Room::rev_iter_t Room::findInTimeline(TimelineItem::index_t index) const
 {
-    return timelineEdge()
+    return historyEdge()
            - (isValidIndex(index) ? index - minTimelineIndex() + 1 : 0);
 }
 
@@ -865,7 +854,7 @@ void Room::Private::getAllMembers()
         // the full members list was requested.
         if (!timeline.empty())
             for (auto it = q->findInTimeline(nextIndex).base();
-                 it != timeline.cend(); ++it)
+                 it != syncEdge(); ++it)
                 if (is<RoomMemberEvent>(**it))
                     roomChanges |= q->processStateEvent(**it);
         if (roomChanges & MembersChange)
@@ -902,6 +891,11 @@ void Room::setFirstDisplayedEventId(const QString& eventId)
     if (d->firstDisplayedEventId == eventId)
         return;
 
+    if (!eventId.isEmpty() && findInTimeline(eventId) == historyEdge())
+        qCWarning(MESSAGES)
+            << eventId
+            << "is marked as first displayed but doesn't seem to be loaded";
+
     d->firstDisplayedEventId = eventId;
     emit firstDisplayedEventChanged();
 }
@@ -923,6 +917,12 @@ void Room::setLastDisplayedEventId(const QString& eventId)
 {
     if (d->lastDisplayedEventId == eventId)
         return;
+
+    const auto marker = findInTimeline(eventId);
+    if (!eventId.isEmpty() && marker == historyEdge())
+        qCWarning(MESSAGES)
+            << eventId
+            << "is marked as last displayed but doesn't seem to be loaded";
 
     d->lastDisplayedEventId = eventId;
     emit lastDisplayedEventChanged();
@@ -1261,8 +1261,6 @@ QStringList Room::htmlSafeMemberNames() const
     return res;
 }
 
-int Room::memberCount() const { return d->membersMap.size(); }
-
 int Room::timelineSize() const { return int(d->timeline.size()); }
 
 bool Room::usesEncryption() const
@@ -1563,20 +1561,18 @@ void Room::updateData(SyncRoomData&& data, bool fromCache)
         roomChanges |= processEphemeralEvent(move(ephemeralEvent));
 
     // See https://github.com/quotient-im/libQuotient/wiki/unread_count
-    if (data.unreadCount != -2 && data.unreadCount != d->unreadMessages) {
-        qCDebug(MESSAGES) << "Setting unread_count to" << data.unreadCount;
-        d->unreadMessages = data.unreadCount;
+    if (merge(d->unreadMessages, data.unreadCount)) {
+        qCDebug(MESSAGES) << "Loaded unread_count:" << *data.unreadCount //
+                          << "in" << objectName();
         emit unreadMessagesChanged(this);
     }
 
-    if (data.highlightCount != d->highlightCount) {
-        d->highlightCount = data.highlightCount;
+    if (merge(d->highlightCount, data.highlightCount))
         emit highlightCountChanged();
-    }
-    if (data.notificationCount != d->notificationCount) {
-        d->notificationCount = data.notificationCount;
+
+    if (merge(d->notificationCount, data.notificationCount))
         emit notificationCountChanged();
-    }
+
     if (roomChanges != Change::NoChange) {
         d->updateDisplayname();
         emit changed(roomChanges);
@@ -1756,56 +1752,79 @@ QString Room::postReaction(const QString& eventId, const QString& key)
     return d->sendEvent<ReactionEvent>(EventRelation::annotate(eventId, key));
 }
 
+QString Room::Private::doPostFile(RoomEventPtr&& msgEvent, const QUrl& localUrl)
+{
+    const auto txnId = addAsPending(move(msgEvent))->transactionId();
+    // Remote URL will only be known after upload; fill in the local path
+    // to enable the preview while the event is pending.
+    q->uploadFile(txnId, localUrl);
+    // Below, the upload job is used as a context object to clean up connections
+    const auto& transferJob = fileTransfers.value(txnId).job;
+    connect(q, &Room::fileTransferCompleted, transferJob,
+            [this, txnId](const QString& tId, const QUrl&, const QUrl& mxcUri) {
+                if (tId != txnId)
+                    return;
+
+                const auto it = q->findPendingEvent(txnId);
+                if (it != unsyncedEvents.end()) {
+                    it->setFileUploaded(mxcUri);
+                    emit q->pendingEventChanged(
+                        int(it - unsyncedEvents.begin()));
+                    doSendEvent(it->get());
+                } else {
+                    // Normally in this situation we should instruct
+                    // the media server to delete the file; alas, there's no
+                    // API specced for that.
+                    qCWarning(MAIN) << "File uploaded to" << mxcUri
+                                    << "but the event referring to it was "
+                                       "cancelled";
+                }
+            });
+    connect(q, &Room::fileTransferCancelled, transferJob,
+            [this, txnId](const QString& tId) {
+                if (tId != txnId)
+                    return;
+
+                const auto it = q->findPendingEvent(txnId);
+                if (it == unsyncedEvents.end())
+                    return;
+
+                const auto idx = int(it - unsyncedEvents.begin());
+                emit q->pendingEventAboutToDiscard(idx);
+                // See #286 on why `it` may not be valid here.
+                unsyncedEvents.erase(unsyncedEvents.begin() + idx);
+                emit q->pendingEventDiscarded();
+            });
+
+    return txnId;
+}
+
+QString Room::postFile(const QString& plainText,
+                       EventContent::TypedBase* content)
+{
+    Q_ASSERT(content != nullptr && content->fileInfo() != nullptr);
+    const auto* const fileInfo = content->fileInfo();
+    Q_ASSERT(fileInfo != nullptr);
+    QFileInfo localFile { fileInfo->url.toLocalFile() };
+    Q_ASSERT(localFile.isFile());
+
+    return d->doPostFile(
+        makeEvent<RoomMessageEvent>(
+            plainText, RoomMessageEvent::rawMsgTypeForFile(localFile), content),
+        fileInfo->url);
+}
+
+#if QT_VERSION_MAJOR < 6
 QString Room::postFile(const QString& plainText, const QUrl& localPath,
                        bool asGenericFile)
 {
     QFileInfo localFile { localPath.toLocalFile() };
     Q_ASSERT(localFile.isFile());
-
-    const auto txnId =
-        d->addAsPending(
-             makeEvent<RoomMessageEvent>(plainText, localFile, asGenericFile))
-            ->transactionId();
-    // Remote URL will only be known after upload; fill in the local path
-    // to enable the preview while the event is pending.
-    uploadFile(txnId, localPath);
-    // Below, the upload job is used as a context object to clean up connections
-    const auto& transferJob = d->fileTransfers.value(txnId).job;
-    connect(this, &Room::fileTransferCompleted, transferJob,
-            [this, txnId](const QString& id, const QUrl&, const QUrl& mxcUri) {
-                if (id == txnId) {
-                    auto it = findPendingEvent(txnId);
-                    if (it != d->unsyncedEvents.end()) {
-                        it->setFileUploaded(mxcUri);
-                        emit pendingEventChanged(
-                            int(it - d->unsyncedEvents.begin()));
-                        d->doSendEvent(it->get());
-                    } else {
-                        // Normally in this situation we should instruct
-                        // the media server to delete the file; alas, there's no
-                        // API specced for that.
-                        qCWarning(MAIN) << "File uploaded to" << mxcUri
-                                        << "but the event referring to it was "
-                                           "cancelled";
-                    }
-                }
-            });
-    connect(this, &Room::fileTransferCancelled, transferJob,
-            [this, txnId](const QString& id) {
-                if (id == txnId) {
-                    auto it = findPendingEvent(txnId);
-                    if (it != d->unsyncedEvents.end()) {
-                        const auto idx = int(it - d->unsyncedEvents.begin());
-                        emit pendingEventAboutToDiscard(idx);
-                        // See #286 on why iterator may not be valid here.
-                        d->unsyncedEvents.erase(d->unsyncedEvents.begin() + idx);
-                        emit pendingEventDiscarded();
-                    }
-                }
-            });
-
-    return txnId;
+    return d->doPostFile(makeEvent<RoomMessageEvent>(plainText, localFile,
+                                                     asGenericFile),
+                         localPath);
 }
+#endif
 
 QString Room::postEvent(RoomEvent* event)
 {
@@ -2107,15 +2126,14 @@ RoomEventPtr makeRedacted(const RoomEvent& target,
         QStringLiteral("membership") };
     // clang-format on
 
-    std::vector<std::pair<event_type_t, QStringList>> keepContentKeysMap {
+    static const std::pair<event_type_t, QStringList> keepContentKeysMap[] {
         { RoomMemberEvent::typeId(), { QStringLiteral("membership") } },
         { RoomCreateEvent::typeId(), { QStringLiteral("creator") } },
         { RoomPowerLevelsEvent::typeId(),
           { QStringLiteral("ban"), QStringLiteral("events"),
             QStringLiteral("events_default"), QStringLiteral("kick"),
             QStringLiteral("redact"), QStringLiteral("state_default"),
-            QStringLiteral("users"), QStringLiteral("users_default") } },
-        { RoomAliasesEvent::typeId(), { QStringLiteral("aliases") } }
+            QStringLiteral("users"), QStringLiteral("users_default") } }
         //        , { RoomJoinRules::typeId(), { QStringLiteral("join_rule") } }
         //        , { RoomHistoryVisibility::typeId(),
         //                { QStringLiteral("history_visibility") } }
@@ -2127,9 +2145,9 @@ RoomEventPtr makeRedacted(const RoomEvent& target,
             ++it;
     }
     auto keepContentKeys =
-        find_if(keepContentKeysMap.begin(), keepContentKeysMap.end(),
+        find_if(begin(keepContentKeysMap), end(keepContentKeysMap),
                 [&target](const auto& t) { return target.type() == t.first; });
-    if (keepContentKeys == keepContentKeysMap.end()) {
+    if (keepContentKeys == end(keepContentKeysMap)) {
         originalJson.remove(ContentKeyL);
         originalJson.remove(PrevContentKeyL);
     } else {
@@ -2338,7 +2356,7 @@ Room::Changes Room::Private::addNewMessageEvents(RoomEvents&& events)
             emit q->aboutToAddNewMessages(eventsSpan);
             auto insertedSize = moveEventsToTimeline(eventsSpan, Newer);
             totalInserted += insertedSize;
-            auto firstInserted = timeline.cend() - insertedSize;
+            auto firstInserted = syncEdge() - insertedSize;
             q->onAddNewTimelineEvents(firstInserted);
             emit q->addedMessages(firstInserted->index(),
                                   timeline.back().index());
@@ -2368,20 +2386,20 @@ Room::Changes Room::Private::addNewMessageEvents(RoomEvents&& events)
         unsyncedEvents.erase(unsyncedEvents.begin() + pendingEvtIdx);
         if (auto insertedSize = moveEventsToTimeline({ remoteEcho, it }, Newer)) {
             totalInserted += insertedSize;
-            q->onAddNewTimelineEvents(timeline.cend() - insertedSize);
+            q->onAddNewTimelineEvents(syncEdge() - insertedSize);
         }
         emit q->pendingEventMerged();
     }
     // Events merged and transferred from `events` to `timeline` now.
-    const auto from = timeline.cend() - totalInserted;
+    const auto from = syncEdge() - totalInserted;
 
     if (q->supportsCalls())
-        for (auto it = from; it != timeline.cend(); ++it)
+        for (auto it = from; it != syncEdge(); ++it)
             if (const auto* evt = it->viewAs<CallEventBase>())
                 emit q->callEvent(q, evt);
 
     if (totalInserted > 0) {
-        for (auto it = from; it != timeline.cend(); ++it) {
+        for (auto it = from; it != syncEdge(); ++it) {
             if (const auto* reaction = it->viewAs<ReactionEvent>()) {
                 const auto& relation = reaction->relation();
                 relations[{ relation.eventId, relation.type }] << reaction;
@@ -2401,7 +2419,7 @@ Room::Changes Room::Private::addNewMessageEvents(RoomEvents&& events)
         // the new message events.
         if (const auto senderId = (*from)->senderId(); !senderId.isEmpty()) {
             auto* const firstWriter = q->user(senderId);
-            if (q->readMarker(firstWriter) != timeline.crend()) {
+            if (q->readMarker(firstWriter) != historyEdge()) {
                 roomChanges |=
                     promoteReadMarker(firstWriter, rev_iter_t(from) - 1);
                 qCDebug(MESSAGES)
@@ -2442,14 +2460,14 @@ void Room::Private::addHistoricalMessageEvents(RoomEvents&& events)
 
     emit q->aboutToAddHistoricalMessages(events);
     const auto insertedSize = moveEventsToTimeline(events, Older);
-    const auto from = timeline.crend() - insertedSize;
+    const auto from = historyEdge() - insertedSize;
 
     qCDebug(STATE) << "Room" << displayname << "received" << insertedSize
                    << "past events; the oldest event is now" << timeline.front();
     q->onAddHistoricalTimelineEvents(from);
     emit q->addedMessages(timeline.front().index(), from->index());
 
-    for (auto it = from; it != timeline.crend(); ++it) {
+    for (auto it = from; it != historyEdge(); ++it) {
         if (const auto* reaction = it->viewAs<ReactionEvent>()) {
             const auto& relation = reaction->relation();
             relations[{ relation.eventId, relation.type }] << reaction;
@@ -2457,7 +2475,7 @@ void Room::Private::addHistoricalMessageEvents(RoomEvents&& events)
         }
     }
     if (from <= q->readMarker())
-        updateUnreadCount(from, timeline.crend());
+        updateUnreadCount(from, historyEdge());
 
     Q_ASSERT(timeline.size() == timelineSize + insertedSize);
     if (insertedSize > 9 || et.nsecsElapsed() >= profilerMinNsecs())
@@ -2488,16 +2506,16 @@ Room::Changes Room::processStateEvent(const RoomEvent& e)
                 return false; // Stay low and hope for the best...
             }
             const auto prevMembership = oldRme ? oldRme->membership()
-                                               : MembershipType::Leave;
+                                               : Membership::Leave;
             switch (prevMembership) {
-            case MembershipType::Invite:
+            case Membership::Invite:
                 if (rme.membership() != prevMembership) {
                     d->usersInvited.removeOne(u);
                     Q_ASSERT(!d->usersInvited.contains(u));
                 }
                 break;
-            case MembershipType::Join:
-                if (rme.membership() == MembershipType::Join) {
+            case Membership::Join:
+                if (rme.membership() == Membership::Join) {
                     // rename/avatar change or no-op
                     if (rme.newDisplayName()) {
                         emit memberAboutToRename(u, *rme.newDisplayName());
@@ -2511,7 +2529,7 @@ Room::Changes Room::processStateEvent(const RoomEvent& e)
                         return false;
                     }
                 } else {
-                    if (rme.membership() == MembershipType::Invite)
+                    if (rme.membership() == Membership::Invite)
                         qCWarning(MAIN)
                             << "Membership change from Join to Invite:" << rme;
                     // whatever the new membership, it's no more Join
@@ -2519,16 +2537,16 @@ Room::Changes Room::processStateEvent(const RoomEvent& e)
                     emit userRemoved(u);
                 }
                 break;
-            case MembershipType::Ban:
-            case MembershipType::Knock:
-            case MembershipType::Leave:
-                if (rme.membership() == MembershipType::Invite
-                    || rme.membership() == MembershipType::Join) {
+            case Membership::Ban:
+            case Membership::Knock:
+            case Membership::Leave:
+                if (rme.membership() == Membership::Invite
+                    || rme.membership() == Membership::Join) {
                     d->membersLeft.removeOne(u);
                     Q_ASSERT(!d->membersLeft.contains(u));
                 }
                 break;
-            case MembershipType::Undefined:
+            case Membership::Undefined:
                 ; // A warning will be dropped in the post-processing block below
             }
             return true;
@@ -2611,10 +2629,10 @@ Room::Changes Room::processStateEvent(const RoomEvent& e)
                 static_cast<const RoomMemberEvent*>(oldStateEvent);
             const auto prevMembership = oldMemberEvent
                                             ? oldMemberEvent->membership()
-                                            : MembershipType::Leave;
+                                            : Membership::Leave;
             switch (evt.membership()) {
-            case MembershipType::Join:
-                if (prevMembership != MembershipType::Join) {
+            case Membership::Join:
+                if (prevMembership != Membership::Join) {
                     d->insertMemberIntoMap(u);
                     emit userAdded(u);
                 } else {
@@ -2626,19 +2644,19 @@ Room::Changes Room::processStateEvent(const RoomEvent& e)
                         emit memberAvatarChanged(u);
                 }
                 break;
-            case MembershipType::Invite:
+            case Membership::Invite:
                 if (!d->usersInvited.contains(u))
                     d->usersInvited.push_back(u);
                 if (u == localUser() && evt.isDirect())
                     connection()->addToDirectChats(this, user(evt.senderId()));
                 break;
-            case MembershipType::Knock:
-            case MembershipType::Ban:
-            case MembershipType::Leave:
+            case Membership::Knock:
+            case Membership::Ban:
+            case Membership::Leave:
                 if (!d->membersLeft.contains(u))
                     d->membersLeft.append(u);
                 break;
-            case MembershipType::Undefined:
+            case Membership::Undefined:
                 qCWarning(MEMBERS) << "Ignored undefined membership type";
             }
             return MembersChange;
@@ -2704,7 +2722,7 @@ Room::Changes Room::processEphemeralEvent(EventPtr&& event)
                                        << p.receipts.size() << "users";
             }
             const auto newMarker = findInTimeline(p.evtId);
-            if (newMarker != timelineEdge()) {
+            if (newMarker != historyEdge()) {
                 for (const Receipt& r : p.receipts) {
                     if (r.userId == connection()->userId())
                         continue; // FIXME, #185
@@ -2724,7 +2742,7 @@ Room::Changes Room::processEphemeralEvent(EventPtr&& event)
                         continue; // FIXME, #185
                     auto u = user(r.userId);
                     if (memberJoinState(u) == JoinState::Join
-                        && readMarker(u) == timelineEdge())
+                        && readMarker(u) == historyEdge())
                         changes |= d->setLastReadEvent(u, p.evtId);
                 }
             }
@@ -2752,7 +2770,7 @@ Room::Changes Room::processAccountDataEvent(EventPtr&& event)
         qCDebug(STATE) << "Server-side read marker at" << readEventId;
         d->serverReadMarker = readEventId;
         const auto newMarker = findInTimeline(readEventId);
-        changes |= newMarker != timelineEdge()
+        changes |= newMarker != historyEdge()
                        ? d->markMessagesAsRead(newMarker)
                        : d->setLastReadEvent(localUser(), readEventId);
     }
@@ -2766,9 +2784,9 @@ Room::Changes Room::processAccountDataEvent(EventPtr&& event)
         qCDebug(STATE) << "Updated account data of type"
                        << currentData->matrixType();
         emit accountDataChanged(currentData->matrixType());
-        return Change::AccountDataChange;
+        changes |= Change::AccountDataChange;
     }
-    return Change::NoChange;
+    return changes;
 }
 
 template <typename ContT>

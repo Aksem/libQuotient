@@ -12,6 +12,8 @@
 #include <QtCore/QUrl>
 #include <QtCore/QMetaType>
 
+class QFileInfo;
+
 namespace Quotient {
 namespace EventContent {
     /**
@@ -47,13 +49,14 @@ namespace EventContent {
     // but specific aggregation structure is altered. See doc comments to
     // each type for the list of available attributes.
 
-    // A quick classes inheritance structure follows:
+    // A quick classes inheritance structure follows (the definitions are
+    // spread across eventcontent.h and roommessageevent.h):
     // FileInfo
-    //   FileContent : UrlBasedContent<FileInfo, Thumbnail>
-    //   AudioContent : UrlBasedContent<FileInfo, Duration>
+    //   FileContent : UrlWithThumbnailContent<FileInfo>
+    //   AudioContent : PlayableContent<UrlBasedContent<FileInfo>>
     //   ImageInfo : FileInfo + imageSize attribute
-    //     ImageContent : UrlBasedContent<ImageInfo, Thumbnail>
-    //     VideoContent : UrlBasedContent<ImageInfo, Thumbnail, Duration>
+    //     ImageContent : UrlWithThumbnailContent<ImageInfo>
+    //     VideoContent : PlayableContent<UrlWithThumbnailContent<ImageInfo>>
 
     /**
      * A base/mixin class for structures representing an "info" object for
@@ -73,11 +76,13 @@ namespace EventContent {
      */
     class FileInfo {
     public:
-        explicit FileInfo(const QUrl& u, qint64 payloadSize = -1,
+        FileInfo() = default;
+        explicit FileInfo(const QFileInfo& fi);
+        explicit FileInfo(QUrl mxcUrl, qint64 payloadSize = -1,
                           const QMimeType& mimeType = {},
-                          const QString& originalFilename = {});
-        FileInfo(const QUrl& u, const QJsonObject& infoJson,
-                 const QString& originalFilename = {});
+                          QString originalFilename = {});
+        FileInfo(QUrl mxcUrl, const QJsonObject& infoJson,
+                 QString originalFilename = {});
 
         bool isValid() const;
 
@@ -113,10 +118,12 @@ namespace EventContent {
      */
     class ImageInfo : public FileInfo {
     public:
-        explicit ImageInfo(const QUrl& u, qint64 fileSize = -1,
-                           QMimeType mimeType = {}, const QSize& imageSize = {},
+        ImageInfo() = default;
+        explicit ImageInfo(const QFileInfo& fi, QSize imageSize = {});
+        explicit ImageInfo(const QUrl& mxcUrl, qint64 fileSize = -1,
+                           const QMimeType& type = {}, QSize imageSize = {},
                            const QString& originalFilename = {});
-        ImageInfo(const QUrl& u, const QJsonObject& infoJson,
+        ImageInfo(const QUrl& mxcUrl, const QJsonObject& infoJson,
                   const QString& originalFilename = {});
 
         void fillInfoJson(QJsonObject* infoJson) const;
@@ -134,7 +141,7 @@ namespace EventContent {
      */
     class Thumbnail : public ImageInfo {
     public:
-        Thumbnail() : ImageInfo(QUrl()) {} // To allow empty thumbnails
+        Thumbnail() = default; // Allow empty thumbnails
         Thumbnail(const QJsonObject& infoJson);
         Thumbnail(const ImageInfo& info) : ImageInfo(info) {}
         using ImageInfo::ImageInfo;
@@ -148,13 +155,13 @@ namespace EventContent {
 
     class TypedBase : public Base {
     public:
-        explicit TypedBase(QJsonObject o = {}) : Base(std::move(o)) {}
         virtual QMimeType type() const = 0;
         virtual const FileInfo* fileInfo() const { return nullptr; }
         virtual FileInfo* fileInfo() { return nullptr; }
         virtual const Thumbnail* thumbnailInfo() const { return nullptr; }
 
     protected:
+        explicit TypedBase(QJsonObject o = {}) : Base(std::move(o)) {}
         using Base::Base;
     };
 

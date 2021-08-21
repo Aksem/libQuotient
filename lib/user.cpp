@@ -65,7 +65,8 @@ User::~User() = default;
 
 void User::load()
 {
-    auto *profileJob = connection()->callApi<GetUserProfileJob>(id());
+    auto* profileJob =
+        connection()->callApi<GetUserProfileJob>(QUrl::toPercentEncoding(id()));
     connect(profileJob, &BaseJob::result, this, [this, profileJob] {
         d->defaultName = profileJob->displayname();
         d->defaultAvatar = Avatar(QUrl(profileJob->avatarUrl()));
@@ -121,11 +122,11 @@ void User::rename(const QString& newName, const Room* r)
         rename(newName);
         return;
     }
-    Q_ASSERT_X(r->memberJoinState(this) == JoinState::Join, __FUNCTION__,
+    // #481: take the current state and update it with the new name
+    auto evtC = r->getCurrentState<RoomMemberEvent>(id())->content();
+    Q_ASSERT_X(evtC.membership == Membership::Join, __FUNCTION__,
                "Attempt to rename a user that's not a room member");
-    const auto actualNewName = sanitized(newName);
-    MemberEventContent evtC;
-    evtC.displayName = actualNewName;
+    evtC.displayName = sanitized(newName);
     r->setState<RoomMemberEvent>(id(), move(evtC));
     // The state will be updated locally after it arrives with sync
 }
@@ -134,17 +135,17 @@ template <typename SourceT>
 inline bool User::doSetAvatar(SourceT&& source)
 {
     return d->defaultAvatar.upload(
-        connection(), source, [this](const QString& contentUri) {
+        connection(), source, [this](const QUrl& contentUri) {
             auto* j = connection()->callApi<SetAvatarUrlJob>(id(), contentUri);
             connect(j, &BaseJob::success, this,
-                    [this, newUrl = QUrl(contentUri)] {
-                        if (newUrl == d->defaultAvatar.url()) {
-                            d->defaultAvatar.updateUrl(newUrl);
+                    [this, contentUri] {
+                        if (contentUri == d->defaultAvatar.url()) {
+                            d->defaultAvatar.updateUrl(contentUri);
                             emit defaultAvatarChanged();
                         } else
                             qCWarning(MAIN) << "User" << id()
                                             << "already has avatar URL set to"
-                                            << newUrl.toDisplayString();
+                                            << contentUri.toDisplayString();
                     });
         });
 }
@@ -161,7 +162,7 @@ bool User::setAvatar(QIODevice* source)
 
 void User::removeAvatar()
 {
-    connection()->callApi<SetAvatarUrlJob>(id(), "");
+    connection()->callApi<SetAvatarUrlJob>(id(), QUrl());
 }
 
 void User::requestDirectChat() { connection()->requestDirectChat(this); }
@@ -196,18 +197,18 @@ const Avatar& User::avatarObject(const Room* room) const
     return d->otherAvatars.try_emplace(mediaId, url).first->second;
 }
 
-QImage User::avatar(int dimension, const Room* room)
+QImage User::avatar(int dimension, const Room* room) const
 {
     return avatar(dimension, dimension, room);
 }
 
-QImage User::avatar(int width, int height, const Room* room)
+QImage User::avatar(int width, int height, const Room* room) const
 {
     return avatar(width, height, room, [] {});
 }
 
 QImage User::avatar(int width, int height, const Room* room,
-                    const Avatar::get_callback_t& callback)
+                    const Avatar::get_callback_t& callback) const
 {
     return avatarObject(room).get(connection(), width, height, callback);
 }

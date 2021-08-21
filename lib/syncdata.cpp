@@ -90,13 +90,13 @@ SyncRoomData::SyncRoomData(const QString& roomId_, JoinState joinState_,
     }
 
     const auto unreadJson = room_.value("unread_notifications"_ls).toObject();
-    unreadCount = unreadJson.value(UnreadCountKey).toInt(-2);
-    highlightCount = unreadJson.value("highlight_count"_ls).toInt();
-    notificationCount = unreadJson.value("notification_count"_ls).toInt();
-    if (highlightCount > 0 || notificationCount > 0)
+    fromJson(unreadJson.value(UnreadCountKey), unreadCount);
+    fromJson(unreadJson.value("highlight_count"_ls), highlightCount);
+    fromJson(unreadJson.value("notification_count"_ls), notificationCount);
+    if (highlightCount.has_value() || notificationCount.has_value())
         qCDebug(SYNCJOB) << "Room" << roomId_
-                         << "has highlights:" << highlightCount
-                         << "and notifications:" << notificationCount;
+                         << "has highlights:" << *highlightCount
+                         << "and notifications:" << *notificationCount;
 }
 
 SyncData::SyncData(const QString& cacheFileName)
@@ -171,13 +171,19 @@ void SyncData::parseJson(const QJsonObject& json, const QString& baseDir)
              deviceOneTimeKeysCount_);
 
     auto rooms = json.value("rooms"_ls).toObject();
-    JoinStates::Int ii = 1; // ii is used to make a JoinState value
     auto totalRooms = 0;
     auto totalEvents = 0;
-    for (size_t i = 0; i < JoinStateStrings.size(); ++i, ii <<= 1) {
+    // The first comparison shortcuts the loop when not all states are there
+    // in the response (anything except "join" is only occasional, and "join"
+    // intentionally comes first in the enum).
+    for (size_t i = 0;
+         static_cast<int>(i) < rooms.size() && i < JoinStateStrings.size(); ++i)
+    {
+        // This assumes that MemberState values go over powers of 2: 1,2,4,...
+        const auto joinState = JoinState(1U << i);
         const auto rs = rooms.value(JoinStateStrings[i]).toObject();
         // We have a Qt container on the right and an STL one on the left
-        roomData.reserve(static_cast<size_t>(rs.size()));
+        roomData.reserve(roomData.size() + static_cast<size_t>(rs.size()));
         for (auto roomIt = rs.begin(); roomIt != rs.end(); ++roomIt) {
             auto roomJson =
                 roomIt->isObject()
@@ -187,7 +193,7 @@ void SyncData::parseJson(const QJsonObject& json, const QString& baseDir)
                 unresolvedRoomIds.push_back(roomIt.key());
                 continue;
             }
-            roomData.emplace_back(roomIt.key(), JoinState(ii), roomJson);
+            roomData.emplace_back(roomIt.key(), joinState, roomJson);
             const auto& r = roomData.back();
             totalEvents += r.state.size() + r.ephemeral.size()
                            + r.accountData.size() + r.timeline.size();
